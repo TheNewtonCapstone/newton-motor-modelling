@@ -16,7 +16,9 @@ fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 12))
 fig.tight_layout(pad=3.0)
 
 # Plot 1: Velocity vs Time with target line
-ax1.plot(df["time"], df["amplitude"], linewidth=2, color="#2E86C1", label="Amplitude")
+ax1.plot(
+    df["time"], df["target_position"], linewidth=2, color="#2E86C1", label="Amplitude"
+)
 # ax1.plot(df['current_time'], df['output'], linewidth=2, color='#27AE60', label='Output')
 ax1.set_xlabel("Time")
 ax1.set_ylabel("Amplitude")
@@ -52,8 +54,8 @@ ax2.legend()
 # ax3.plot(df['current_time'], df['output'], alpha=0.6, color='#E74C3C', label='Output')
 # velocity = df['current_velocity'] / VELOCITY_RANGE
 # ax3.plot(df['current_time'], velocity, alpha=0.6, color='#2E86C1', label='Velocity')
-# NORMALIZED_TARGET_VELOCITY = TARGET_VELOCITY / VELOCITY_RANGE
-# ax3.axhline(y=NORMALIZED_TARGET_VELOCITY, color='#E74C3C', linestyle='--', label='Target Velocity')
+# NORMALIZED_target_position = target_position / VELOCITY_RANGE
+# ax3.axhline(y=NORMALIZED_target_position, color='#E74C3C', linestyle='--', label='Target Velocity')
 # ax3.set_xlabel('Time')
 # ax3.set_ylabel('Output')
 
