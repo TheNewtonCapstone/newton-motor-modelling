@@ -531,8 +531,8 @@ def main():
     trainer = ActuatorTrainer(model)
     history = trainer.train(train_loader, val_loader)
 
-    trainer.plot_training_history(history, save_path='../results/training_history.png')
-    trainer.plot_prediction_vs_actual(val_loader, save_path='../results/prediction_vs_actual.png')
+    trainer.plot_training_history(history, save_path='../results/mlp/training_history.png')
+    trainer.plot_prediction_vs_actual(val_loader, save_path='../results/mlp/prediction_vs_actual.png')
 
     trainer.denormalize_and_compare(val_loader, dataset, base_save_path="comprehensive_comparison")
     # Save model
