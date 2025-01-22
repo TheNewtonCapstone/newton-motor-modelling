@@ -90,7 +90,6 @@ def main():
         for a in np.arange(0, amplitude, amplitude_step):
             for f in np.arange(0, frequency, frequency_step):
                 lock_state.acquire()
-
                 current_state["target_position"] = (
                     math.sin(2 * math.pi * f * current_state["time"]) * a
                 )
