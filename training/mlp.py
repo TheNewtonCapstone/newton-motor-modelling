@@ -501,11 +501,39 @@ class ActuatorTrainer:
         print(f"Predicted Torque: [{min(results['predicted_torque']):.4f}, {max(results['predicted_torque']):.4f}] Nm")
 
     def save_model(self, path: str, scaler_params: Dict) -> None:
-        """Save model and scaling parameters"""
+        """Save model and scaling parameters
+
+        Args:
+            path: Path to save the model (without extension)
+            scaler_params: Dictionary containing normalization parameters
+        """
+        # Save model state
+        torch.save({
+            'model_state_dict': self.model.state_dict(),
+            'scaler_params': scaler_params,
+            'input_size': self.model.network[0].in_features,
+            'hidden_size': self.model.network[0].out_features,
+            'num_layers': len([layer for layer in self.model.network if isinstance(layer, nn.Linear)])
+        }, f"{path}.pth")
+
+        # Save normalization parameters separately for easier access
+        import json
+        with open(f"{path}_scaler.json", 'w') as f:
+            json.dump(scaler_params, f, indent=4)
 
     def load_model(self, path: str) -> Tuple[Dict, Dict]:
-        """Load model and scaling parameters"""
+        checkpoint = torch.load(f"{path}.pt")
+        # Reconstruct model architecture
+        self.model = ActuatorNet(
+            input_size=checkpoint['input_size'],
+            hidden_size=checkpoint['hidden_size'],
+            num_layers=checkpoint['num_layers']
+        )
 
+        # Load model weights
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+
+        return checkpoint['model_state_dict'], checkpoint['scaler_params']
 
 # Example usage:
 def main():
@@ -535,9 +563,12 @@ def main():
     trainer.plot_prediction_vs_actual(val_loader, save_path='../results/mlp/prediction_vs_actual.png')
 
     trainer.denormalize_and_compare(val_loader, dataset, base_save_path="comprehensive_comparison")
-    # Save model
-    # trainer.save_model("actuator_model.pth", dataset.scaler_params)
+    save_path = "../models/mlp_motor_model"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    trainer.save_model(save_path, dataset.scaler_params)
 
+    # Test loading
+    loaded_state_dict, loaded_scaler_params = trainer.load_model(save_path)
 
 if __name__ == "__main__":
     main()
