@@ -186,6 +186,6 @@ if __name__ == "__main__":
 
     git_root = subprocess.check_output("git rev-parse --show-toplevel", shell=True).decode("utf-8").strip()
     model_path = os.path.join(git_root, "models", "lstm_motor_model.pth")
-    data_path = os.path.join(git_root, "data", "data_full_200125_1914.csv")
+    data_path = os.path.join(git_root, "data", "data_full_sin.csv")
 
     main(model_path, data_path)

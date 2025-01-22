@@ -1,11 +1,6 @@
 import math
 from odrive.enums import AxisState
 
-import threading
-
-lock_state = threading.Lock()
-
-
 # the goal is to move the motor to a variety of positions
 # while it does that, it should read position, velocity and current values (at a fixed frequency (e.g. 500Hz)); save them to a CSV file along with the time stamp, target position and steps since start
 
@@ -27,13 +22,14 @@ def main():
     start_time = time.time()
 
     def run(current_state):
-        lock_state.acquire()
-
         # read target position
         if odrv.axis0.disarm_reason != 0:
             raise BaseException(str(odrv.axis0.disarm_reason))
 
-        # set target position
+        # set target position 
+        current_state["target_position"] = (
+            np.sin(2 * np.pi * current_state["frequency"] * current_state["time"]).item() * current_state["amplitude"]
+        )
         odrv.axis0.controller.input_pos = current_state["target_position"]
 
         # read position, velocity and current values
@@ -57,9 +53,6 @@ def main():
             ]
         )
 
-        if lock_state.locked():
-            lock_state.release()
-
     current_state = {
         "timestep": 0,
         "time": 0.0,
@@ -72,46 +65,32 @@ def main():
         "data": [],
     }
 
-    from timer import RepeatedTimer
+    control_frequency = 400  # 500 Hz
 
-    control_frequency = 500  # 500 Hz
-    sending_frequency = 100  # 50 Hz
-
-    rt = RepeatedTimer(1.0 / control_frequency, run, current_state)
-
-    amplitude = 9  # maximum 9 turns on each side
-    amplitude_step = 0.1
-    frequency = 20  # 1 Hz
-    frequency_step = 0.1
+    amplitude = 10  # maximum 9 turns on each side
+    amplitude_step = 0.5
+    frequency = 10  # 1 Hz
+    frequency_step = 0.5
 
     import numpy as np
 
     try:
-        for a in np.arange(0, amplitude, amplitude_step):
-            for f in np.arange(0, frequency, frequency_step):
-                lock_state.acquire()
+        for a in np.arange(amplitude_step, amplitude, amplitude_step):
+            for f in np.arange(frequency_step, frequency, frequency_step):
+                print(f"Amplitude: {a}, Frequency: {f}")
 
-                current_state["target_position"] = (
-                    math.sin(2 * math.pi * f * current_state["time"]) * a
-                )
                 current_state["amplitude"] = a
                 current_state["frequency"] = f
 
-                if lock_state.locked():
-                    lock_state.release()
-
-                time.sleep(1.0 / sending_frequency)
+                for i in range(0, control_frequency):
+                    run(current_state)
+                    time.sleep(1.0 / control_frequency)
 
     except KeyboardInterrupt:
         print("Cancelled")
     except BaseException as e:
         print("Error: " + str(e))
     finally:
-        rt.stop()
-
-        if lock_state.locked():
-            lock_state.release()
-
         with open(f"data_{start_time}.csv", "w") as file:
             for key in current_state.keys():
                 if key == "data":
