@@ -40,7 +40,7 @@ def train(model, dataloader, criterion, optimizer, device="cpu", num_epochs=10):
             num_batches += 1
 
         avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.6f}")
 
 
 def evaluate(model, dataloader, criterion, device="cpu"):
@@ -74,7 +74,7 @@ def evaluate(model, dataloader, criterion, device="cpu"):
     all_predictions = torch.cat(all_predictions, dim=0)
     all_targets = torch.cat(all_targets, dim=0)
 
-    print(f"Evaluation Loss: {avg_loss:.4f}")
+    print(f"Evaluation Loss: {avg_loss:.6f}")
     return avg_loss, all_predictions, all_targets
 
 
@@ -87,7 +87,7 @@ def main(model_path: str, data_path: str):
 
     # Define loss function & optimizer
     actuator_criterion = nn.MSELoss()
-    actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.001)
+    actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.0005)
 
     dataset_transforms = {
         "position_error": ("target_position", "position", lambda x, y: x - y)
@@ -95,7 +95,7 @@ def main(model_path: str, data_path: str):
 
     # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
     dataset = TimeSeriesDataset(data_path, input_columns=["position_error", "velocity"],
-                                target_columns=["torque"], seq_length=10, column_transforms=dataset_transforms)
+                                target_columns=["torque"], seq_length=150, column_transforms=dataset_transforms)
 
     # Define split sizes
     train_size = int(0.9 * len(dataset))  # 90% of the dataset
@@ -105,13 +105,13 @@ def main(model_path: str, data_path: str):
     train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
 
     # Create DataLoaders (shuffle only batches, not individual sequences)
-    train_loader = DataLoader(train_dataset, batch_size=40, shuffle=True)
-    eval_loader = DataLoader(eval_dataset, batch_size=40, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    eval_loader = DataLoader(eval_dataset, batch_size=64, shuffle=False)
 
     # Training loop
-    train(actuator_model, train_loader, actuator_criterion, actuator_optimizer, device=device, num_epochs=500)
+    train(actuator_model, train_loader, actuator_criterion, actuator_optimizer, device=device, num_epochs=300)
 
-    torch.save(actuator_model, model_path)
+    torch.save(actuator_model.state_dict(), model_path)
 
     actuator_model.eval()
 
@@ -124,7 +124,8 @@ def main_eval(model_path: str, data_path: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load model
-    model = torch.load(model_path, map_location=device)  # Load saved model
+    model = LSTMActuator().to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
 
     # Define column transformations
     dataset_transforms = {
@@ -133,7 +134,7 @@ def main_eval(model_path: str, data_path: str):
 
     # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
     dataset = TimeSeriesDataset(data_path, input_columns=["position_error", "velocity"],
-                                target_columns=["torque"], seq_length=10, column_transforms=dataset_transforms)
+                                target_columns=["torque"], seq_length=150, column_transforms=dataset_transforms)
 
     # Define split sizes
     train_size = int(0.9 * len(dataset))  # 90% of the dataset
@@ -152,7 +153,8 @@ def main_eval(model_path: str, data_path: str):
 def cli(model_path: str):
     # Load the model
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = torch.load(model_path, map_location=device)  # Load saved model
+    model = LSTMActuator().to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
 
     from training.motor_controller import MotorController
     motor_controller = MotorController(model, device)
@@ -186,4 +188,4 @@ if __name__ == "__main__":
     model_path = os.path.join(git_root, "models", "lstm_motor_model.pth")
     data_path = os.path.join(git_root, "data", "data_full_200125_1914.csv")
 
-    main_eval(model_path, data_path)
+    main(model_path, data_path)
