@@ -28,7 +28,10 @@ def train(model, dataloader, criterion, optimizer, device="cpu", num_epochs=10):
         num_batches = 0
 
         for inputs, targets in dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)  # Move data to device (CPU/GPU)
+            inputs, targets = (
+                inputs.to(device),
+                targets.to(device),
+            )  # Move data to device (CPU/GPU)
 
             optimizer.zero_grad()  # Clear previous gradients
             outputs = model(inputs)  # Forward pass
@@ -40,7 +43,8 @@ def train(model, dataloader, criterion, optimizer, device="cpu", num_epochs=10):
             num_batches += 1
 
         avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.6f}")
+        avg_root_loss = avg_loss ** 0.5
+        print(f"Epoch {epoch + 1}/{num_epochs}, MSE: {avg_loss:.6f}, RMSE: {avg_root_loss:.6f}")
 
 
 def evaluate(model, dataloader, criterion, device="cpu"):
@@ -53,7 +57,10 @@ def evaluate(model, dataloader, criterion, device="cpu"):
 
     with torch.no_grad():  # Disable gradient computation
         for inputs, targets in dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)  # Move to device (CPU/GPU)
+            inputs, targets = (
+                inputs.to(device),
+                targets.to(device),
+            )  # Move to device (CPU/GPU)
 
             # Forward pass (get model predictions)
             outputs = model(inputs)
@@ -83,33 +90,41 @@ def main(model_path: str, data_path: str):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Instantiate model
-    actuator_model = LSTMActuator().to(device)
+    actuator_model = LSTMActuator(hidden_size=64, num_layers=2).to(device)
 
     # Define loss function & optimizer
     actuator_criterion = nn.MSELoss()
-    actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.0005)
+    actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.001)
 
     dataset_transforms = {
         "position_error": ("target_position", "position", lambda x, y: x - y)
     }
 
     # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
-    dataset = TimeSeriesDataset(data_path, input_columns=["position_error", "velocity"],
-                                target_columns=["torque"], seq_length=150, column_transforms=dataset_transforms)
-
-    # Define split sizes
-    train_size = int(0.9 * len(dataset))  # 90% of the dataset
-    eval_size = len(dataset) - train_size  # Remaining 10%
+    dataset = TimeSeriesDataset(
+        data_path,
+        input_columns=["position_error", "velocity"],
+        target_columns=["torque"],
+        seq_length=20,
+        column_transforms=dataset_transforms,
+    )
 
     # Perform random split
-    train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
+    train_dataset, eval_dataset = random_split(dataset, [0.9, 0.1])
 
     # Create DataLoaders (shuffle only batches, not individual sequences)
     train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     eval_loader = DataLoader(eval_dataset, batch_size=64, shuffle=False)
 
     # Training loop
-    train(actuator_model, train_loader, actuator_criterion, actuator_optimizer, device=device, num_epochs=300)
+    train(
+        actuator_model,
+        train_loader,
+        actuator_criterion,
+        actuator_optimizer,
+        device=device,
+        num_epochs=50,
+    )
 
     torch.save(actuator_model.state_dict(), model_path)
 
@@ -133,8 +148,13 @@ def main_eval(model_path: str, data_path: str):
     }
 
     # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
-    dataset = TimeSeriesDataset(data_path, input_columns=["position_error", "velocity"],
-                                target_columns=["torque"], seq_length=150, column_transforms=dataset_transforms)
+    dataset = TimeSeriesDataset(
+        data_path,
+        input_columns=["position_error", "velocity"],
+        target_columns=["torque"],
+        seq_length=150,
+        column_transforms=dataset_transforms,
+    )
 
     # Define split sizes
     train_size = int(0.9 * len(dataset))  # 90% of the dataset
@@ -157,6 +177,7 @@ def cli(model_path: str):
     model.load_state_dict(torch.load(model_path, map_location=device))
 
     from training.motor_controller import MotorController
+
     motor_controller = MotorController(model, device)
 
     print("Motor Controller CLI - Enter a target position to get torque predictions.")
@@ -184,8 +205,12 @@ if __name__ == "__main__":
     import subprocess
     import os
 
-    git_root = subprocess.check_output("git rev-parse --show-toplevel", shell=True).decode("utf-8").strip()
+    git_root = (
+        subprocess.check_output("git rev-parse --show-toplevel", shell=True)
+        .decode("utf-8")
+        .strip()
+    )
     model_path = os.path.join(git_root, "models", "lstm_motor_model.pth")
-    data_path = os.path.join(git_root, "data", "data_full_200125_1914.csv")
+    data_path = os.path.join(git_root, "data", "data_full_sin.csv")
 
     main(model_path, data_path)
