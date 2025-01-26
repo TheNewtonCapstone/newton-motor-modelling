@@ -1,11 +1,10 @@
 import time
 from threading import Thread
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import matplotlib.pyplot as plt
-from drawnow import drawnow
 from torch.utils.data import DataLoader, random_split
 
 from time_series_dataset import TimeSeriesDataset
@@ -36,11 +35,12 @@ class WeightedMSELoss(nn.Module):
 
 
 class TrainingThread(Thread):
-    def __init__(self, model, dataloader, criterion, optimizer, scheduler, device="cpu", num_epochs=100, early_stop_patience=10):
+    def __init__(self, model, train_dataloader, eval_dataloader, criterion, optimizer, scheduler, device="cpu", num_epochs=100, early_stop_patience=10):
         super().__init__()
 
         self.model = model
-        self.dataloader = dataloader
+        self.train_dataloader = train_dataloader
+        self.eval_dataloader = eval_dataloader
         self.criterion = criterion
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -51,19 +51,23 @@ class TrainingThread(Thread):
         self.losses = []
         self.rmse_losses = []
         self.learning_rates = []
+        self.eval_losses = []
+        self.eval_rmse_losses = []
+        self.train_eval_loss_diffs = []
 
-        self.best_loss = float('inf')
+        self.best_mse_loss = float('inf')
         self.patience_counter = 0
 
     def run(self):
         self.model.to(self.device)
-        self.model.train()
 
         for epoch in range(self.num_epochs):
+            self.model.train()
+
             total_loss = 0.0
             num_batches = 0
 
-            for inputs, targets in self.dataloader:
+            for inputs, targets in self.train_dataloader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
                 self.optimizer.zero_grad()
                 outputs = self.model(inputs)
@@ -74,18 +78,24 @@ class TrainingThread(Thread):
                 total_loss += loss.item()
                 num_batches += 1
 
-            avg_loss = total_loss / num_batches
-            self.scheduler.step(avg_loss)
+            mse_loss = total_loss / num_batches
+            self.scheduler.step(mse_loss)
             current_lr = self.optimizer.param_groups[0]['lr']
 
-            self.losses.append(avg_loss)
-            self.rmse_losses.append(avg_loss ** 0.5)
+            eval_loss, eval_rmse_loss, _, _ = self.evaluate()
+            eval_loss_diff = mse_loss - eval_loss
+
+            self.losses.append(mse_loss)
+            self.rmse_losses.append(mse_loss ** 0.5)
             self.learning_rates.append(current_lr)
+            self.eval_losses.append(eval_loss)
+            self.eval_rmse_losses.append(eval_rmse_loss)
+            self.train_eval_loss_diffs.append(eval_loss_diff)
 
-            print(f"Epoch {epoch + 1}/{self.num_epochs}, MSE: {avg_loss:.6f}, LR: {current_lr:.6f}")
+            print(f"Epoch {epoch + 1}/{self.num_epochs}, MSE: {mse_loss:.6f}, LR: {current_lr:.6f}, Eval MSE: {eval_loss:.6f}, Eval RMSE: {eval_rmse_loss:.6f}, Diff: {eval_loss_diff:.6f}")
 
-            if avg_loss < self.best_loss:
-                self.best_loss = avg_loss
+            if mse_loss < self.best_mse_loss:
+                self.best_mse_loss = mse_loss
                 self.patience_counter = 0
             else:
                 self.patience_counter += 1
@@ -94,6 +104,43 @@ class TrainingThread(Thread):
                 print(f"Early stopping at epoch {epoch}")
                 break
 
+    def evaluate(self):
+        self.model.eval()  # Set to evaluation mode
+        total_loss = 0.0
+        num_batches = 0
+
+        all_predictions = []
+        all_targets = []
+
+        with torch.no_grad():  # Disable gradient computation
+            for inputs, targets in self.eval_dataloader:
+                inputs, targets = (
+                    inputs.to(self.device),
+                    targets.to(self.device),
+                )  # Move to device (CPU/GPU)
+
+                # Forward pass (get model predictions)
+                outputs = self.model(inputs)
+
+                # Compute loss
+                loss = self.criterion(outputs, targets)
+                total_loss += loss.item()
+                num_batches += 1
+
+                # Store predictions and actual values for further analysis
+                all_predictions.append(outputs.cpu())  # Move to CPU for easy analysis
+                all_targets.append(targets.cpu())
+
+        # Compute average loss
+        mse_loss = total_loss / num_batches
+        rmse_loss = mse_loss ** 0.5
+
+        # Convert lists to tensors
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
+
+        return mse_loss, rmse_loss, all_predictions, all_targets
+
 
 def plot(train_thread: TrainingThread):
     plt.clf()
@@ -101,6 +148,9 @@ def plot(train_thread: TrainingThread):
     plt.subplot(2, 1, 1)
     plt.plot(train_thread.losses, label='MSE', color='blue')
     plt.plot(train_thread.rmse_losses, label='RMSE', color='red')
+    plt.plot(train_thread.eval_losses, label='Eval MSE', color='orange')
+    plt.plot(train_thread.eval_rmse_losses, label='Eval RMSE', color='purple')
+    plt.plot(train_thread.train_eval_loss_diffs, label='Train-Eval Diff', color='black')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.legend()
@@ -116,45 +166,7 @@ def plot(train_thread: TrainingThread):
     plt.tight_layout()
 
     plt.gcf().canvas.draw_idle()
-    plt.gcf().canvas.start_event_loop(0.3)
-
-
-def evaluate(model, dataloader, criterion, device="cpu"):
-    model.eval()  # Set to evaluation mode
-    total_loss = 0.0
-    num_batches = 0
-
-    all_predictions = []
-    all_targets = []
-
-    with torch.no_grad():  # Disable gradient computation
-        for inputs, targets in dataloader:
-            inputs, targets = (
-                inputs.to(device),
-                targets.to(device),
-            )  # Move to device (CPU/GPU)
-
-            # Forward pass (get model predictions)
-            outputs = model(inputs)
-
-            # Compute loss
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-            num_batches += 1
-
-            # Store predictions and actual values for further analysis
-            all_predictions.append(outputs.cpu())  # Move to CPU for easy analysis
-            all_targets.append(targets.cpu())
-
-    # Compute average loss
-    avg_loss = total_loss / num_batches
-
-    # Convert lists to tensors
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-
-    print(f"Evaluation Loss: {avg_loss:.6f}")
-    return avg_loss, all_predictions, all_targets
+    plt.gcf().canvas.start_event_loop(0.1)
 
 
 def main(model_path: str, data_path: str):
@@ -202,6 +214,7 @@ def main(model_path: str, data_path: str):
     train_thread = TrainingThread(
         actuator_model,
         train_loader,
+        eval_loader,
         actuator_criterion,
         actuator_optimizer,
         actuator_scheduler,
@@ -216,6 +229,7 @@ def main(model_path: str, data_path: str):
 
     while train_thread.is_alive():
         plot(train_thread)
+        time.sleep(0.1)
 
     plt.ioff()
     train_thread.join()
