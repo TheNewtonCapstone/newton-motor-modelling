@@ -34,6 +34,22 @@ class WeightedMSELoss(nn.Module):
         return torch.mean(weights * (pred - target) ** 2)
 
 
+class CombinedLoss(nn.Module):
+    def __init__(self, custom_loss: nn.Module = None, alpha=0.8):
+        super().__init__()
+        self.alpha = alpha
+        self.loss = custom_loss if custom_loss is not None else nn.MSELoss()
+
+    def forward(self, outputs, targets, eval_loss=None):
+        loss = self.loss(outputs, targets)
+
+        if eval_loss is not None:
+            diff_penalty = (loss - eval_loss) ** 2
+            return self.alpha * loss + (1 - self.alpha) * diff_penalty
+
+        return loss
+
+
 class TrainingThread(Thread):
     def __init__(self, model, train_dataloader, eval_dataloader, criterion, optimizer, scheduler, device="cpu", num_epochs=100, early_stop_patience=10):
         super().__init__()
@@ -69,9 +85,13 @@ class TrainingThread(Thread):
 
             for inputs, targets in self.train_dataloader:
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
+
+                # Get evaluation loss first
+                eval_loss = self.quick_evaluate()
+
                 self.optimizer.zero_grad()
                 outputs = self.model(inputs)
-                loss = self.criterion(outputs, targets)
+                loss = self.criterion(outputs, targets, eval_loss)
                 loss.backward()
                 self.optimizer.step()
 
@@ -103,6 +123,20 @@ class TrainingThread(Thread):
             if self.patience_counter >= self.early_stop_patience:
                 print(f"Early stopping at epoch {epoch}")
                 break
+
+    def quick_evaluate(self):
+        """Quick evaluation on a single batch for loss computation"""
+        self.model.eval()
+
+        with torch.no_grad():
+            eval_inputs, eval_targets = next(iter(self.eval_dataloader))
+            eval_inputs, eval_targets = eval_inputs.to(self.device), eval_targets.to(self.device)
+            eval_outputs = self.model(eval_inputs)
+            eval_loss = nn.MSELoss()(eval_outputs, eval_targets)
+
+        self.model.train()
+
+        return eval_loss
 
     def evaluate(self):
         self.model.eval()  # Set to evaluation mode
@@ -179,7 +213,8 @@ def main(model_path: str, data_path: str):
     actuator_model = LSTMActuator(hidden_size=32, num_layers=1).to(device)
 
     # Define loss function & optimizer
-    actuator_criterion = WeightedMSELoss()
+    actuator_inner_criterion = WeightedMSELoss()
+    actuator_criterion = CombinedLoss(actuator_inner_criterion)
     actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.001)
     actuator_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         actuator_optimizer,
@@ -208,7 +243,7 @@ def main(model_path: str, data_path: str):
 
     # Create DataLoaders (shuffle only batches, not individual sequences)
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=False)
+    eval_loader = DataLoader(eval_dataset, batch_size=32, shuffle=True) # shuffle because we don't want the model to memorize the sequence
 
     # Training loop
     train_thread = TrainingThread(
@@ -235,43 +270,6 @@ def main(model_path: str, data_path: str):
     train_thread.join()
 
     torch.save(actuator_model.state_dict(), model_path)
-
-    actuator_model.eval()
-
-    # Evaluate model on validation set
-    evaluate(actuator_model, eval_loader, actuator_criterion, device=device)
-
-
-def main_eval(model_path: str, data_path: str):
-    # Evaluate model on validation set
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load model
-    model = LSTMActuator().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
-
-    # Define column transformations
-    dataset_transforms = {
-        "position_error": ("target_position", "position", lambda x, y: x - y)
-    }
-
-    # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
-    dataset = TimeSeriesDataset(
-        data_path,
-        input_columns=["position_error", "velocity"],
-        target_columns=["torque"],
-        seq_length=150,
-        column_transforms=dataset_transforms,
-    )
-
-    # Perform random split
-    train_dataset, eval_dataset = random_split(dataset, [0.9, 0.1])
-
-    # Create DataLoaders (shuffle only batches, not individual sequences)
-    eval_loader = DataLoader(eval_dataset, batch_size=40, shuffle=False)
-
-    # Evaluate model on validation set
-    evaluate(model, eval_loader, nn.MSELoss(), device=device)
 
 
 if __name__ == "__main__":
