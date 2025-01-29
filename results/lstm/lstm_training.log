@@ -1,0 +1,2 @@
+Using device: cuda
+Model architecture: LSTMActuator(input_size=2, hidden_size=32, num_layers=1, output_size=1)
