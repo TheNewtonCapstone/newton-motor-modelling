@@ -11,7 +11,7 @@ from time_series_dataset import TimeSeriesDataset
 
 
 class LSTMActuator(nn.Module):
-    def __init__(self, input_size=2, hidden_size=32, num_layers=1, output_size=1):
+    def __init__(self, input_size=3, hidden_size=32, num_layers=1, output_size=1):
         super(LSTMActuator, self).__init__()
 
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
@@ -62,7 +62,7 @@ class TrainingThread(Thread):
         criterion,
         optimizer,
         scheduler,
-        device="cpu",
+        device="cuda",
         log_file=None,
         num_epochs=100,
         early_stop_patience=10,
@@ -267,7 +267,7 @@ def main(model_path: str, data_path: str, log_dir: str):
     print("Model architecture:", actuator_model, file=log_file)
 
     # Define loss function & optimizer
-    actuator_inner_criterion = WeightedMSELoss()
+    # actuator_inner_criterion = WeightedMSELoss()
     actuator_criterion = WeightedMSELoss()
     actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.003)
     actuator_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -278,22 +278,21 @@ def main(model_path: str, data_path: str, log_dir: str):
         min_lr=1e-6,
     )
 
-    dataset_transforms = {
-        "position_error_rad": (
-            "target_position",
-            "position",
-            lambda x, y: (x - y) * 2 * torch.pi,
-        ),
-        "velocity_rad": ("velocity", "velocity", lambda x, y: x * 2 * torch.pi),
-    }
+    # dataset_transforms = {
+    #     "position_error_rad": (
+    #         "target_position",
+    #         "position",
+    #         lambda x, y: (x - y) * 2 * torch.pi,
+    #     ),
+    #     "velocity_rad": ("velocity", "velocity", lambda x, y: x * 2 * torch.pi),
+    # }
 
     # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
     dataset = TimeSeriesDataset(
         data_path,
-        input_columns=["position_error_rad", "velocity_rad"],
+        input_columns=["position", "velocity", "target"],
         target_columns=["torque"],
         seq_length=4,
-        column_transforms=dataset_transforms,
     )
 
     # Perform random split
@@ -342,8 +341,8 @@ if __name__ == "__main__":
         .decode("utf-8")
         .strip()
     )
-    model_path = os.path.join(git_root, "models", "lstm_motor_model.pth")
-    data_path = os.path.join(git_root, "data", "complete", "data_full_sin.csv")
+    model_path = os.path.join(git_root, "models", "lstm_motor_model_hfe.pth")
+    data_path = os.path.join(git_root, "data/complete/data_full_sin.csv")
     log_dir = os.path.join(git_root, "results", "lstm")
 
     main(model_path, data_path, log_dir)
