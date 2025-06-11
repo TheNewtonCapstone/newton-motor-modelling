@@ -543,8 +543,6 @@ def main():
     dataset.normalize_data()
     dataset.save_csv("../data/processed_data.csv")
 
-    print(f"Dataset length: {len(dataset)}")
-
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
