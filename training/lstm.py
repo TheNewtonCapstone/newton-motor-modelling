@@ -1,17 +1,24 @@
+import time
+from threading import Thread
+
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, random_split
 
 from time_series_dataset import TimeSeriesDataset
 
 
 class LSTMActuator(nn.Module):
-    def __init__(self, input_size=2, hidden_size=32, num_layers=1, output_size=1):
+    def __init__(self, input_size=3, hidden_size=32, num_layers=1, output_size=1):
         super(LSTMActuator, self).__init__()
 
         self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
         self.fc = nn.Linear(hidden_size, output_size)
+
+    def __str__(self):
+        return f"LSTMActuator(input_size={self.lstm.input_size}, hidden_size={self.lstm.hidden_size}, num_layers={self.lstm.num_layers}, output_size={self.fc.out_features})"
 
     def forward(self, x):
         lstm_out, _ = self.lstm(x)  # Pass through LSTM
@@ -19,171 +26,323 @@ class LSTMActuator(nn.Module):
         return output
 
 
-def train(model, dataloader, criterion, optimizer, device="cpu", num_epochs=10):
-    model.to(device)  # Move model to GPU
-    model.train()  # Set to training mode
+class WeightedMSELoss(nn.Module):
+    def __init__(self, threshold=0.8):
+        super().__init__()
+        self.threshold = threshold
 
-    for epoch in range(num_epochs):
+    def forward(self, pred, target):
+        # Higher weights for high torque regions
+        weights = torch.where(torch.abs(target) > self.threshold, 2.0, 1.0)
+        return torch.mean(weights * (pred - target) ** 2)
+
+
+class CombinedLoss(nn.Module):
+    def __init__(self, custom_loss: nn.Module = None, alpha=0.8):
+        super().__init__()
+        self.alpha = alpha
+        self.loss = custom_loss if custom_loss is not None else nn.MSELoss()
+
+    def forward(self, outputs, targets, eval_loss=None):
+        loss = self.loss(outputs, targets)
+
+        if eval_loss is not None:
+            diff_penalty = torch.abs(loss - eval_loss)
+            return self.alpha * loss + (1 - self.alpha) * diff_penalty
+
+        return loss
+
+
+class TrainingThread(Thread):
+    def __init__(
+        self,
+        model,
+        train_dataloader,
+        eval_dataloader,
+        criterion,
+        optimizer,
+        scheduler,
+        device="cuda",
+        log_file=None,
+        num_epochs=100,
+        early_stop_patience=10,
+        include_diff_loss=False,
+    ):
+        super().__init__()
+
+        self.model = model
+        self.train_dataloader = train_dataloader
+        self.eval_dataloader = eval_dataloader
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.device = device
+        self.log_file = log_file
+        self.num_epochs = num_epochs
+        self.early_stop_patience = early_stop_patience
+        self.include_diff_loss = include_diff_loss
+
+        self.losses = []
+        self.rmse_losses = []
+        self.learning_rates = []
+        self.eval_losses = []
+        self.eval_rmse_losses = []
+        self.train_eval_loss_diffs = []
+
+        self.best_mse_loss = float("inf")
+        self.patience_counter = 0
+
+    def run(self):
+        import sys
+
+        log_file = self.log_file if self.log_file is not None else sys.stdout
+
+        self.model.to(self.device)
+
+        for epoch in range(self.num_epochs):
+            self.model.train()
+
+            total_loss = 0.0
+            num_batches = 0
+
+            for inputs, targets in self.train_dataloader:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+
+                if self.include_diff_loss:
+                    # Get evaluation loss first
+                    eval_loss = self.quick_evaluate()
+
+                    self.optimizer.zero_grad()
+
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, targets, eval_loss)
+                    loss.backward()
+
+                    self.optimizer.step()
+                else:
+                    self.optimizer.zero_grad()
+
+                    outputs = self.model(inputs)
+                    loss = self.criterion(outputs, targets)
+                    loss.backward()
+
+                    self.optimizer.step()
+
+                total_loss += loss.item()
+                num_batches += 1
+
+            mse_loss = total_loss / num_batches
+            rmse_loss = mse_loss**0.5
+            self.scheduler.step(mse_loss)
+            current_lr = self.optimizer.param_groups[0]["lr"]
+
+            eval_loss, eval_rmse_loss, _, _ = self.evaluate()
+            eval_loss_diff = mse_loss - eval_loss
+
+            self.losses.append(mse_loss)
+            self.rmse_losses.append(rmse_loss)
+            self.learning_rates.append(current_lr)
+            self.eval_losses.append(eval_loss)
+            self.eval_rmse_losses.append(eval_rmse_loss)
+            self.train_eval_loss_diffs.append(eval_loss_diff)
+
+            print(
+                f"Epoch {epoch + 1}/{self.num_epochs}, MSE: {mse_loss:.6f}, RMSE: {rmse_loss:.6f}, LR: {current_lr:.6f}, Eval MSE: {eval_loss:.6f}, Eval RMSE: {eval_rmse_loss:.6f}, Diff: {eval_loss_diff:.6f}",
+                file=log_file,
+            )
+
+            if mse_loss < self.best_mse_loss:
+                self.best_mse_loss = mse_loss
+                self.patience_counter = 0
+            else:
+                self.patience_counter += 1
+
+            if self.patience_counter >= self.early_stop_patience:
+                print(f"Early stopping at epoch {epoch}", file=log_file)
+                break
+
+    def quick_evaluate(self):
+        """Quick evaluation on a single batch for loss computation"""
+        self.model.eval()
+
+        with torch.no_grad():
+            eval_inputs, eval_targets = next(iter(self.eval_dataloader))
+            eval_inputs, eval_targets = (
+                eval_inputs.to(self.device),
+                eval_targets.to(self.device),
+            )
+            eval_outputs = self.model(eval_inputs)
+            eval_loss = nn.MSELoss()(eval_outputs, eval_targets)
+
+        self.model.train()
+
+        return eval_loss
+
+    def evaluate(self):
+        self.model.eval()  # Set to evaluation mode
+
         total_loss = 0.0
         num_batches = 0
 
-        for inputs, targets in dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)  # Move data to device (CPU/GPU)
+        all_predictions = []
+        all_targets = []
 
-            optimizer.zero_grad()  # Clear previous gradients
-            outputs = model(inputs)  # Forward pass
-            loss = criterion(outputs, targets)  # Compute loss
-            loss.backward()  # Backpropagation
-            optimizer.step()  # Update weights
+        with torch.no_grad():  # Disable gradient computation
+            for inputs, targets in self.eval_dataloader:
+                inputs, targets = (
+                    inputs.to(self.device),
+                    targets.to(self.device),
+                )  # Move to device (CPU/GPU)
 
-            total_loss += loss.item()
-            num_batches += 1
+                # Forward pass (get model predictions)
+                outputs = self.model(inputs)
 
-        avg_loss = total_loss / num_batches
-        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+                # Compute loss
+                loss = self.criterion(outputs, targets)
+                total_loss += loss.item()
+                num_batches += 1
 
+                # Store predictions and actual values for further analysis
+                all_predictions.append(outputs.cpu())  # Move to CPU for easy analysis
+                all_targets.append(targets.cpu())
 
-def evaluate(model, dataloader, criterion, device="cpu"):
-    model.eval()  # Set to evaluation mode
-    total_loss = 0.0
-    num_batches = 0
+        # Compute average loss
+        mse_loss = total_loss / num_batches
+        rmse_loss = mse_loss**0.5
 
-    all_predictions = []
-    all_targets = []
+        # Convert lists to tensors
+        all_predictions = torch.cat(all_predictions, dim=0)
+        all_targets = torch.cat(all_targets, dim=0)
 
-    with torch.no_grad():  # Disable gradient computation
-        for inputs, targets in dataloader:
-            inputs, targets = inputs.to(device), targets.to(device)  # Move to device (CPU/GPU)
-
-            # Forward pass (get model predictions)
-            outputs = model(inputs)
-
-            # Compute loss
-            loss = criterion(outputs, targets)
-            total_loss += loss.item()
-            num_batches += 1
-
-            # Store predictions and actual values for further analysis
-            all_predictions.append(outputs.cpu())  # Move to CPU for easy analysis
-            all_targets.append(targets.cpu())
-
-    # Compute average loss
-    avg_loss = total_loss / num_batches
-
-    # Convert lists to tensors
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-
-    print(f"Evaluation Loss: {avg_loss:.4f}")
-    return avg_loss, all_predictions, all_targets
+        return mse_loss, rmse_loss, all_predictions, all_targets
 
 
-def main(model_path: str, data_path: str):
+def plot(train_thread: TrainingThread):
+    plt.clf()
+
+    plt.subplot(3, 1, 1)
+    plt.plot(train_thread.losses, label="MSE", color="blue")
+    plt.plot(train_thread.eval_losses, label="Eval MSE", color="orange")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+
+    plt.subplot(3, 1, 2)
+    plt.plot(train_thread.rmse_losses, label="RMSE", color="red")
+    plt.plot(train_thread.eval_rmse_losses, label="Eval RMSE", color="purple")
+    plt.plot(train_thread.train_eval_loss_diffs, label="Train-Eval Diff", color="black")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.grid(True)
+
+    plt.subplot(3, 1, 3)
+    plt.plot(train_thread.learning_rates, label="Learning Rate", color="green")
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.yscale("log")
+    plt.legend()
+    plt.grid(True)
+
+    plt.tight_layout()
+
+    plt.gcf().canvas.draw_idle()
+    plt.gcf().canvas.start_event_loop(0.1)
+
+
+def main(model_path: str, data_path: str, log_dir: str):
     # Evaluate model on validation set
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    log_path = os.path.join(log_dir, "lstm_training.log")
+    log_file = open(log_path, "w")
+
+    print(f"Using device: {device}", file=log_file)
+
+    early_stop_patience = 6
 
     # Instantiate model
-    actuator_model = LSTMActuator().to(device)
+    actuator_model = LSTMActuator(hidden_size=32, num_layers=1).to(device)
+
+    print("Model architecture:", actuator_model, file=log_file)
 
     # Define loss function & optimizer
-    actuator_criterion = nn.MSELoss()
-    actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.001)
+    # actuator_inner_criterion = WeightedMSELoss()
+    actuator_criterion = WeightedMSELoss()
+    actuator_optimizer = optim.Adam(actuator_model.parameters(), lr=0.003)
+    actuator_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        actuator_optimizer,
+        mode="min",
+        factor=0.3,
+        patience=early_stop_patience // 2,
+        min_lr=1e-6,
+    )
 
-    dataset_transforms = {
-        "position_error": ("target_position", "position", lambda x, y: x - y)
-    }
+    # dataset_transforms = {
+    #     "position_error_rad": (
+    #         "target_position",
+    #         "position",
+    #         lambda x, y: (x - y) * 2 * torch.pi,
+    #     ),
+    #     "velocity_rad": ("velocity", "velocity", lambda x, y: x * 2 * torch.pi),
+    # }
 
     # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
-    dataset = TimeSeriesDataset(data_path, input_columns=["position_error", "velocity"],
-                                target_columns=["torque"], seq_length=10, column_transforms=dataset_transforms)
-
-    # Define split sizes
-    train_size = int(0.9 * len(dataset))  # 90% of the dataset
-    eval_size = len(dataset) - train_size  # Remaining 10%
+    dataset = TimeSeriesDataset(
+        data_path,
+        input_columns=["position", "velocity", "target"],
+        target_columns=["torque"],
+        seq_length=4,
+    )
 
     # Perform random split
-    train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
+    train_dataset, eval_dataset = random_split(dataset, [0.9, 0.1])
 
     # Create DataLoaders (shuffle only batches, not individual sequences)
-    train_loader = DataLoader(train_dataset, batch_size=40, shuffle=True)
-    eval_loader = DataLoader(eval_dataset, batch_size=40, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+    eval_loader = DataLoader(
+        eval_dataset, batch_size=32, shuffle=True
+    )  # shuffle because we don't want the model to memorize the sequence by evaluating
 
     # Training loop
-    train(actuator_model, train_loader, actuator_criterion, actuator_optimizer, device=device, num_epochs=500)
+    train_thread = TrainingThread(
+        actuator_model,
+        train_loader,
+        eval_loader,
+        actuator_criterion,
+        actuator_optimizer,
+        actuator_scheduler,
+        device=device,
+        num_epochs=500,
+        early_stop_patience=early_stop_patience,
+    )
+    train_thread.start()
 
-    torch.save(actuator_model, model_path)
+    plt.ion()
+    plt.figure(figsize=(10, 10))
 
-    actuator_model.eval()
+    while train_thread.is_alive():
+        plot(train_thread)
+        time.sleep(0.1)
 
-    # Evaluate model on validation set
-    evaluate(actuator_model, eval_loader, actuator_criterion, device=device)
+    plt.ioff()
+    plt.savefig(os.path.join(log_dir, "lstm_training.png"))
+    train_thread.join()
 
-
-def main_eval(model_path: str, data_path: str):
-    # Evaluate model on validation set
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Load model
-    model = torch.load(model_path, map_location=device)  # Load saved model
-
-    # Define column transformations
-    dataset_transforms = {
-        "position_error": ("target_position", "position", lambda x, y: x - y)
-    }
-
-    # Create DataLoader for batch training (and take 90% of data for training; 10% for validation)
-    dataset = TimeSeriesDataset(data_path, input_columns=["position_error", "velocity"],
-                                target_columns=["torque"], seq_length=10, column_transforms=dataset_transforms)
-
-    # Define split sizes
-    train_size = int(0.9 * len(dataset))  # 90% of the dataset
-    eval_size = len(dataset) - train_size  # Remaining 10%
-
-    # Perform random split
-    train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
-
-    # Create DataLoaders (shuffle only batches, not individual sequences)
-    eval_loader = DataLoader(eval_dataset, batch_size=40, shuffle=False)
-
-    # Evaluate model on validation set
-    evaluate(model, eval_loader, nn.MSELoss(), device=device)
-
-
-def cli(model_path: str):
-    # Load the model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = torch.load(model_path, map_location=device)  # Load saved model
-
-    from training.motor_controller import MotorController
-    motor_controller = MotorController(model, device)
-
-    print("Motor Controller CLI - Enter a target position to get torque predictions.")
-    print("Type 'exit' to quit.\n")
-
-    while True:
-        try:
-            target_pos = input("Enter target position: ")
-            if target_pos.lower() == "exit":
-                print("Exiting...")
-                break
-
-            target_pos = float(target_pos)
-            predicted_torque = motor_controller.predict_torque(target_pos)
-
-            print(f"Predicted Torque: {predicted_torque:.4f}")
-            print(f"Updated Position: {motor_controller.current_position:.4f}")
-            print(f"Updated Velocity: {motor_controller.current_velocity:.4f}\n")
-
-        except ValueError:
-            print("Invalid input! Please enter a valid number or type 'exit'.")
+    torch.save(actuator_model.state_dict(), model_path)
 
 
 if __name__ == "__main__":
     import subprocess
     import os
 
-    git_root = subprocess.check_output("git rev-parse --show-toplevel", shell=True).decode("utf-8").strip()
-    model_path = os.path.join(git_root, "models", "lstm_motor_model.pth")
-    data_path = os.path.join(git_root, "data", "data_full_200125_1914.csv")
+    git_root = (
+        subprocess.check_output("git rev-parse --show-toplevel", shell=True)
+        .decode("utf-8")
+        .strip()
+    )
+    model_path = os.path.join(git_root, "models", "lstm_motor_model_hfe.pth")
+    data_path = os.path.join(git_root, "data/complete/data_full_sin.csv")
+    log_dir = os.path.join(git_root, "results", "lstm")
 
-    main_eval(model_path, data_path)
+    main(model_path, data_path, log_dir)

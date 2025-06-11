@@ -65,7 +65,7 @@ class ActuatorDataset(Dataset):
             target = window["torque"].values[-1]
             features.append(feature)
             targets.append(target)
-        self.features = np.array(features)
+        self.features = np.array(features)[::-1]
         self.targets = np.array(targets)
 
     def normalize_data(self) -> None:
@@ -98,7 +98,12 @@ class ActuatorDataset(Dataset):
         self.targets = targets_norm
         print(f"Features shape: {self.features.shape}, Targets shape: {self.targets.shape}")
 
-
+    def save_preprocessed_data(self, file_path: str) -> None:
+        headers = ["pos_error_t-0.000", "pos_error_t-0.010", "pos_error_t-0.020", "velocity_t-0.000",
+                   "velocity_t-0.010", "velocity_t-0.020", "torque"]
+        processed_data: np.array = np.column_stack([self.features, self.targets])
+        df_processed_data = pd.DataFrame(processed_data)
+        df_processed_data.to_csv(file_path, index=False, header=headers, float_format='%.6f')
 
     def __len__(self) -> int:
         """Return length of dataset"""
@@ -566,7 +571,7 @@ def main():
     trainer.save_model(save_path, dataset.scaler_params)
 
     # Test loading
-    loaded_state_dict, loaded_scaler_params = trainer.load_model(save_path)
+    # loaded_state_dict, loaded_scaler_params = trainer.load_model(save_path)
 
 if __name__ == "__main__":
     main()
